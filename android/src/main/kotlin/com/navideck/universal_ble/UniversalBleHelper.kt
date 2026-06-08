@@ -140,9 +140,48 @@ fun Int.parseScanErrorMessage(): String {
 
 val ScanResult.manufacturerDataList: List<UniversalManufacturerData>
     get() {
-        return scanRecord?.manufacturerSpecificData?.toList()?.map { (key, value) ->
-            UniversalManufacturerData(key.toLong(), value)
-        } ?: emptyList()
+        // `ScanRecord.getManufacturerSpecificData()` returns a SparseArray keyed
+        // by company id. When one advertisement carries two manufacturer-specific
+        // (0xFF) AD structures with the *same* company id, the framework's
+        // SparseArray.put overwrites the first with the last, so only one structure
+        // survives — and which one depends on the chipset's adv/scan-response merge
+        // order. Parse the raw advertising bytes ourselves instead and concatenate
+        // every structure that shares a company id (in record order), so no payload
+        // is silently dropped. Mirrors flutter_blue_plus's getBytes()-based parse.
+        val raw = scanRecord?.bytes
+            ?: return scanRecord?.manufacturerSpecificData?.toList()?.map { (key, value) ->
+                UniversalManufacturerData(key.toLong(), value)
+            } ?: emptyList()
+
+        // LinkedHashMap preserves first-seen company-id order.
+        val byCompany = LinkedHashMap<Int, java.io.ByteArrayOutputStream>()
+        var i = 0
+        while (i < raw.size) {
+            val fieldLen = raw[i].toInt() and 0xFF
+            if (fieldLen == 0) break                 // padding / end of data
+            if (i + fieldLen >= raw.size) break       // malformed / truncated
+            val type = raw[i + 1].toInt() and 0xFF
+            // 0xFF = Manufacturer Specific Data; need >= len 3 for the 2-byte company id.
+            if (type == 0xFF && fieldLen >= 3) {
+                val companyId =
+                    (raw[i + 2].toInt() and 0xFF) or ((raw[i + 3].toInt() and 0xFF) shl 8)
+                val data = raw.copyOfRange(i + 4, i + 1 + fieldLen)
+                byCompany.getOrPut(companyId) { java.io.ByteArrayOutputStream() }
+                    .write(data)
+            }
+            i += fieldLen + 1
+        }
+
+        if (byCompany.isEmpty()) {
+            // Fall back to the framework parse if we couldn't read raw bytes meaningfully.
+            return scanRecord?.manufacturerSpecificData?.toList()?.map { (key, value) ->
+                UniversalManufacturerData(key.toLong(), value)
+            } ?: emptyList()
+        }
+
+        return byCompany.map { (companyId, buffer) ->
+            UniversalManufacturerData(companyId.toLong(), buffer.toByteArray())
+        }
     }
 
 val ScanResult.serviceData: Map<String, ByteArray>

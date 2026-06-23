@@ -140,10 +140,30 @@ fun Int.parseScanErrorMessage(): String {
 
 val ScanResult.manufacturerDataList: List<UniversalManufacturerData>
     get() {
+        parseManufacturerData(scanRecord?.bytes)?.let { return it }
         return scanRecord?.manufacturerSpecificData?.toList()?.map { (key, value) ->
             UniversalManufacturerData(key.toLong(), value)
         } ?: emptyList()
     }
+
+internal fun parseManufacturerData(raw: ByteArray?): List<UniversalManufacturerData>? {
+    if (raw == null) return null
+    val list = mutableListOf<UniversalManufacturerData>()
+    var i = 0
+    while (i < raw.size) {
+        val fieldLen = raw[i].toInt() and 0xFF
+        if (fieldLen == 0) break
+        if (i + fieldLen >= raw.size) break
+        if ((raw[i + 1].toInt() and 0xFF) == 0xFF && fieldLen >= 3) {
+            val companyId =
+                (raw[i + 2].toInt() and 0xFF) or ((raw[i + 3].toInt() and 0xFF) shl 8)
+            val data = raw.copyOfRange(i + 4, i + 1 + fieldLen)
+            list.add(UniversalManufacturerData(companyId.toLong(), data))
+        }
+        i += fieldLen + 1
+    }
+    return list.ifEmpty { null }
+}
 
 val ScanResult.serviceData: Map<String, ByteArray>
     get() {
